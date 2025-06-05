@@ -1,10 +1,15 @@
+# init.R
 
-required_packages <- c("data.table", "gdxrrw", "tidyverse")
+# Install and load required packages
 
-# Install any packages that are not already installed
-installed_packages <- rownames(installed.packages())
+required_packages <- c("gdxrrw", "dplyr")
+
 for (pkg in required_packages) {
-  if (!(pkg %in% installed_packages)) {
-    install.packages(pkg, dependencies = TRUE)
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
   }
+  library(pkg, character.only = TRUE)
 }
+
+# Note for gdxrrw users:
+# 'gdxrrw' requires GAMS to be installed and its path correctly set in your system.
