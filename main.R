@@ -18,7 +18,7 @@ library(dplyr)
 # Define the relative path to the folder containing the downloaded CSV files
 input_folder <- "inputs"
 # Define the name for the output GDX file
-gdx_output_filename <- "faostat_data.gdx"
+gdx_output_filename <- "outputs/faostat_data.gdx"
 
 # --- Main Script ---
 
