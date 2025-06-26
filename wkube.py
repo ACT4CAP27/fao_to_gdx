@@ -6,12 +6,12 @@ task = WKubeTask(
     base_stack='GAMS40_1__R4_0',
     command="Rscript main.R",
     required_cores=1,
-    required_ram=1024*1024*512,
-    required_storage_local=1024*1024*2,
+    required_ram=1024*1024*1024*10,
+    required_storage_local=1024*1024*1024*10,
     required_storage_workflow=1024*1024,
     timeout=60*60,
     conf={
-        "input_mappings": "acc://act4cap27/temp_rds/:/code/inputs/",
+        "input_mappings": "acc://act4cap27/FAODATA/:/code/inputs/",
         "output_mappings": "/code/outputs/:acc://out"
     }
 )

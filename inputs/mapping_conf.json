@@ -1,18 +1,15 @@
 {
   "dimensions": ["Region", "ProductCategory", "Product", "Metric", "Year"],
-
+  "values": ["Value"],
   "datasets": {
-    "QC": {
+    "QI": {
       "mapping": {
-        "Region": "Area",
-        "Product": "Item",
-        "ProductCategory": {
-          "from": "Item",
-          "file": "mappings/item_to_category.csv"
-        },
-        "Metric": "Element",
-        "Year": "Year",
-        "Value": "Value"
+        "Region": "area",
+        "Product": "item_code",
+        "ProductCategory": "element_code",
+        "Metric": "element",
+        "Year": "year",
+        "Value": "value"
       }
     }
   },

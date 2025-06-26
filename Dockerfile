@@ -1,0 +1,42 @@
+FROM debian:bullseye-slim
+
+RUN apt-get update && \
+    apt-get install -y curl gnupg2 libcurl4-openssl-dev libv8-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+
+RUN apt-get update && \
+    apt-get install -y r-base && \
+    rm -rf /var/lib/apt/lists/*
+
+
+ENV LATEST=40.1.1
+ENV LATEST_SHORT=40.1
+ENV GAMS_VERSION=${LATEST}
+ENV GAMS_BIT_ARC=x64_64
+
+RUN mkdir -p /opt/gams
+
+RUN curl -SL "https://testwithfastapi.s3.us-east-1.amazonaws.com/${LATEST}-linux_${GAMS_BIT_ARC}_sfx.exe" \
+    --create-dirs -o /opt/gams/gams.exe
+
+WORKDIR /opt/gams
+RUN chmod +x gams.exe && \
+    ./gams.exe && \
+    rm -rf gams.exe
+
+ENV GAMS_PATH=/opt/gams/gams${LATEST_SHORT}_linux_${GAMS_BIT_ARC}_sfx
+ENV PATH=$PATH:$GAMS_PATH
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$GAMS_PATH
+
+WORKDIR /code
+
+COPY ./init.R /code/init.R
+
+RUN Rscript /code/init.R;
+
+COPY . /code
+
+CMD ["R"]
+
+

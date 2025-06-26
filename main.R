@@ -1,166 +1,150 @@
-# --- CONFIGURATION ---
+library(gamstransfer)
+library(jsonlite)
+library(dplyr)
+
+# Configuration
 input_folder <- "inputs"
 output_gdx_path <- "outputs/faostat_data.gdx"
 config_file <- file.path(input_folder, "mapping_conf.json")
-
-# --- JSON SCHEMA (embedded inline) ---
-config_schema <- '{
-  "type": "object",
-  "required": ["dimensions", "datasets"],
-  "properties": {
-    "dimensions": {
-      "type": "array",
-      "items": { "type": "string" },
-      "minItems": 1
-    },
-    "datasets": {
-      "type": "object",
-      "patternProperties": {
-        "^[A-Z0-9]+$": {
-          "type": "object",
-          "required": ["mapping"],
-          "properties": {
-            "mapping": {
-              "type": "object",
-              "minProperties": 1,
-              "additionalProperties": {
-                "oneOf": [
-                  { "type": "string" },
-                  {
-                    "type": "object",
-                    "required": ["from", "file"],
-                    "properties": {
-                      "from": { "type": "string" },
-                      "file": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                  }
-                ]
-              }
-            }
-          },
-          "additionalProperties": false
-        }
-      }
-    },
-    "comment": { "type": "string" }
-  },
-  "additionalProperties": false
-}'
 
 # --- Load and validate config ---
 if (!file.exists(config_file)) stop("Config file not found: ", config_file)
 config <- fromJSON(config_file, simplifyVector = FALSE)
 
-tmp_schema <- tempfile(fileext = ".json")
-writeLines(config_schema, tmp_schema)
-validator <- json_validator(tmp_schema, engine = "ajv", schema = "draft7")
-if (!validator(config_file)) stop("Config file does not conform to schema.")
+# Flatten keys
+config$dimensions <- unlist(config$dimensions, use.names = FALSE)
+config$values <- unlist(config$values, use.names = FALSE)
 
-dimensions <- config$dimensions
-datasets <- config$datasets
+# --- Manual config validation ---
+if (length(config$dimensions) == 0) stop("Invalid config: 'dimensions' must be a non-empty array.")
+if (length(config$values) == 0) stop("Invalid config: 'values' must be a non-empty array.")
+if (is.null(config$datasets) || !is.list(config$datasets)) stop("Invalid config: 'datasets' must be an object.")
 
-# --- Begin processing ---
+for (code in names(config$datasets)) {
+  if (is.null(config$datasets[[code]]$mapping)) {
+    stop("Missing 'mapping' for FAO code: ", code)
+  }
+}
+
+domain_dims <- config$dimensions
+value_cols <- config$values
+m <- Container$new()
+
+# --- Process CSV files ---
 csv_files <- list.files(input_folder, pattern = "_data\\.csv$", full.names = TRUE)
 if (length(csv_files) == 0) stop("No *_data.csv files found in input folder.")
-
-m <- Container$new()
 
 for (file_path in csv_files) {
   file_basename <- basename(file_path)
   fao_code <- sub("_data\\.csv$", "", file_basename)
 
-  message("\nProcessing FAO code: ", fao_code, " from file: ", file_basename)
+  message("\n📄 Processing FAO code: ", fao_code, " from file: ", file_basename)
 
-  if (!fao_code %in% names(datasets)) {
-    warning("No config entry for FAO code: ", fao_code, ". Skipping.")
+  if (!fao_code %in% names(config$datasets)) {
+    message("⚠️ No mapping for FAO code: ", fao_code, ". Skipping.")
     next
   }
 
   df <- tryCatch(read.csv(file_path, stringsAsFactors = FALSE), error = function(e) {
-    warning("Failed to read CSV file: ", file_basename)
+    message("❌ Failed to read: ", file_basename)
     return(NULL)
   })
   if (is.null(df)) next
 
-  mapping_cfg <- datasets[[fao_code]]$mapping
-  result_df <- data.frame()
+  cat("🧾 Columns in source file:\n")
+  cat(paste0(" - ", names(df), collapse = "\n"), "\n\n")
 
-  for (target_dim in names(mapping_cfg)) {
-    mapping_rule <- mapping_cfg[[target_dim]]
+  mapping_cfg <- config$datasets[[fao_code]]$mapping
+  result_df <- data.frame(row_id = seq_len(nrow(df)))
 
-    if (is.character(mapping_rule)) {
-      # Direct rename
-      source_col <- mapping_rule
+  for (target_col in names(mapping_cfg)) {
+    rule <- mapping_cfg[[target_col]]
+    if (is.character(rule)) {
+      source_col <- rule
       if (!source_col %in% names(df)) {
-        warning("Column '", source_col, "' not found in ", file_basename)
+        message("⚠️ Column '", source_col, "' not found in ", file_basename)
         next
       }
-      result_df[[target_dim]] <- df[[source_col]]
-    } else if (is.list(mapping_rule) && !is.null(mapping_rule$from) && !is.null(mapping_rule$file)) {
-      source_col <- mapping_rule$from
-      mapping_csv <- file.path(input_folder, mapping_rule$file)
+      result_df[[target_col]] <- df[[source_col]]
+
+    } else if (is.list(rule) && !is.null(rule$from) && !is.null(rule$file)) {
+      source_col <- rule$from
+      mapping_csv <- file.path(input_folder, rule$file)
 
       if (!source_col %in% names(df)) {
-        warning("Source column '", source_col, "' not found in file ", file_basename)
+        message("⚠️ Source column '", source_col, "' not found in file ", file_basename)
         next
       }
       if (!file.exists(mapping_csv)) {
-        warning("Mapping file not found: ", mapping_csv)
+        message("⚠️ Mapping file missing: ", mapping_csv)
         next
       }
 
       map_df <- read.csv(mapping_csv, stringsAsFactors = FALSE)
-      if (!(source_col %in% names(map_df)) || !(target_dim %in% names(map_df))) {
-        warning("Mapping file ", mapping_csv, " must contain columns: ", source_col, " and ", target_dim)
+      if (!(source_col %in% names(map_df)) || !(target_col %in% names(map_df))) {
+        message("⚠️ Mapping file '", mapping_csv, "' must contain columns: ", source_col, " and ", target_col)
         next
       }
 
-      # Join mapping
       mapped <- left_join(df[, source_col, drop = FALSE], map_df, by = setNames(source_col, source_col))
-      # Apply fallback
-      mapped[[target_dim]][is.na(mapped[[target_dim]])] <- paste0(target_dim, "_", df[[source_col]][is.na(mapped[[target_dim]])])
-      result_df[[target_dim]] <- mapped[[target_dim]]
+      fallback <- paste0(target_col, "_", df[[source_col]])
+      mapped[[target_col]][is.na(mapped[[target_col]])] <- fallback[is.na(mapped[[target_col]])]
+      result_df[[target_col]] <- mapped[[target_col]]
+
     } else {
-      warning("Invalid mapping format for '", target_dim, "' in FAO code: ", fao_code)
+      message("⚠️ Invalid mapping for target column '", target_col, "' in ", fao_code)
       next
     }
   }
 
-  # Check for Value column
-  if (!"Value" %in% names(result_df)) {
-    warning("No 'Value' column found for ", fao_code, ". Skipping.")
+  expected_cols <- c(domain_dims, value_cols)
+  missing_cols <- setdiff(expected_cols, names(result_df))
+  if (length(missing_cols) > 0) {
+    message("⚠️ Missing mapped columns for ", fao_code, ": ", paste(missing_cols, collapse = ", "))
     next
   }
 
-  # Ensure all dimensions exist
-  missing_dims <- setdiff(dimensions, names(result_df))
-  if (length(missing_dims) > 0) {
-    warning("Missing dimensions in ", fao_code, ": ", paste(missing_dims, collapse = ", "))
-    next
+  # Coerce domain dims to character
+  for (d in domain_dims) {
+    result_df[[d]] <- as.character(result_df[[d]])
   }
 
-  # Order columns: dimensions + Value
-  final_df <- result_df[, c(dimensions, "Value")]
+  any_value_added <- FALSE
 
-  # Add parameter to GAMS container
-  param_name <- paste0("p_", tolower(fao_code))
-  p <- m$addParameter(param_name,
-                      domain = dimensions,
-                      description = paste("FAOSTAT data for", fao_code))
-  p$setRecords(final_df)
+  for (val_col in value_cols) {
+    value_vector <- suppressWarnings(as.numeric(result_df[[val_col]]))
 
-  message("✔ Processed FAO code: ", fao_code)
+    if (all(is.na(value_vector))) {
+      message("⚠️ Column '", val_col, "' is not numeric or has no data in ", fao_code, ". Skipping.")
+      next
+    }
+
+    final_df <- result_df[, c(domain_dims, val_col)]
+    names(final_df)[1:length(domain_dims)] <- domain_dims  # Ensure exact domain names
+    final_df[[val_col]] <- value_vector  # Ensure numeric
+
+    # Confirm structure
+    actual_domains <- names(final_df)[1:length(domain_dims)]
+    if (!identical(actual_domains, domain_dims)) {
+      stop("🛑 Domain mismatch: expected ", paste(domain_dims, collapse = ", "),
+          " but got ", paste(actual_domains, collapse = ", "))
+    }
+    param_name <- paste0("p_", tolower(fao_code), "_", tolower(val_col))
+    p <- m$addParameter(param_name, domain = domain_dims, description = paste(val_col, "for", fao_code))
+    p$setRecords(final_df)
+
+    message("🔢 Records in parameter ", param_name, ": ", nrow(final_df))
+
+    message("✅ Added parameter: ", param_name)
+    any_value_added <- TRUE
+  }
+
+  if (!any_value_added) {
+    message("⚠️ No valid numeric values found for ", fao_code)
+  } else {
+    message("✅ Finished processing FAO code: ", fao_code)
+  }
 }
 
-# --- Write GDX ---
-if (length(m$parameters) > 0) {
-  tryCatch({
-    m$write(output_gdx_path)
-    message("\n✅ Successfully wrote GDX file to: ", output_gdx_path)
-  }, error = function(e) {
-    warning("❌ Failed to write GDX: ", e$message)
-  })
-} else {
-  message("No parameters were added. No GDX file created.")
-}
+m$write(output_gdx_path)
+message("\n🎉 GDX written to: ", output_gdx_path)
