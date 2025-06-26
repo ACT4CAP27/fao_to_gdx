@@ -1,4 +1,9 @@
 inputs/*
 !inputs/.gitkeep
+!inputs/mapping_conf.json
+!inputs/category_mappings
+inputs/category_mappings/*
+!inputs/category_mappings/.gitkeep
+
 outputs/*
 !outputs/.gitkeep

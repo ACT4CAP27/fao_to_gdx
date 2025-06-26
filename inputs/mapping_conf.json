@@ -1,0 +1,21 @@
+{
+  "dimensions": ["Region", "ProductCategory", "Product", "Metric", "Year"],
+
+  "datasets": {
+    "QC": {
+      "mapping": {
+        "Region": "Area",
+        "Product": "Item",
+        "ProductCategory": {
+          "from": "Item",
+          "file": "mappings/item_to_category.csv"
+        },
+        "Metric": "Element",
+        "Year": "Year",
+        "Value": "Value"
+      }
+    }
+  },
+
+  "comment": "Final dimensions on the left; source or derivation on the right"
+}

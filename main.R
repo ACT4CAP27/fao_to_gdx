@@ -1,107 +1,166 @@
-# Filename: convert_csv_to_gdx_with_gamstransfer.R
-
-# Install and load required packages if not already installed
-if (!requireNamespace("gamstransfer", quietly = TRUE)) {
-  # Install from CRAN (recommended)
-  install.packages("gamstransfer")
-  # Or from GAMS R-universe for latest version (often more up-to-date)
-  # install.packages("gamstransfer", repos = c("https://gams-dev.r-universe.dev", "https://cloud.r-project.org"))
-}
-library(gamstransfer)
-
-if (!requireNamespace("dplyr", quietly = TRUE)) {
-  install.packages("dplyr")
-}
-library(dplyr)
-
-# --- Configuration ---
-# Define the relative path to the folder containing the downloaded CSV files
+# --- CONFIGURATION ---
 input_folder <- "inputs"
-# Define the name for the output GDX file
-gdx_output_filename <- "outputs/faostat_data.gdx"
+output_gdx_path <- "outputs/faostat_data.gdx"
+config_file <- file.path(input_folder, "mapping_conf.json")
 
-# --- Main Script ---
+# --- JSON SCHEMA (embedded inline) ---
+config_schema <- '{
+  "type": "object",
+  "required": ["dimensions", "datasets"],
+  "properties": {
+    "dimensions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "datasets": {
+      "type": "object",
+      "patternProperties": {
+        "^[A-Z0-9]+$": {
+          "type": "object",
+          "required": ["mapping"],
+          "properties": {
+            "mapping": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "required": ["from", "file"],
+                    "properties": {
+                      "from": { "type": "string" },
+                      "file": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "comment": { "type": "string" }
+  },
+  "additionalProperties": false
+}'
 
-# Construct the full path to the GDX file
-gdx_output_file <- file.path(input_folder, gdx_output_filename)
+# --- Load and validate config ---
+if (!file.exists(config_file)) stop("Config file not found: ", config_file)
+config <- fromJSON(config_file, simplifyVector = FALSE)
 
-if (!dir.exists(input_folder)) {
-  stop(paste("Error: Input folder '", input_folder, "' not found. Please ensure your CSV files are in this directory.", sep = ""))
-}
+tmp_schema <- tempfile(fileext = ".json")
+writeLines(config_schema, tmp_schema)
+validator <- json_validator(tmp_schema, engine = "ajv", schema = "draft7")
+if (!validator(config_file)) stop("Config file does not conform to schema.")
 
-message(paste("Searching for FAOSTAT CSV files in:", file.path(getwd(), input_folder)))
+dimensions <- config$dimensions
+datasets <- config$datasets
 
-# List all CSV files that match the expected pattern (e.g., 'QC_data.csv')
+# --- Begin processing ---
 csv_files <- list.files(input_folder, pattern = "_data\\.csv$", full.names = TRUE)
+if (length(csv_files) == 0) stop("No *_data.csv files found in input folder.")
 
-if (length(csv_files) == 0) {
-  stop(paste("Error: No FAOSTAT CSV files found in '", input_folder, "'. Please ensure files like 'CODE_data.csv' exist.", sep = ""))
-}
-
-message(paste("Found", length(csv_files), "CSV files to process."))
-
-# Initialize a GAMS Container object
 m <- Container$new()
 
-# Loop through each found CSV file
 for (file_path in csv_files) {
-  # Extract the FAOSTAT code from the filename (e.g., "QC_data.csv" -> "QC")
-  file_basename <- basename(file_path) # e.g., "QC_data.csv"
-  fao_code <- sub("_data\\.csv$", "", file_basename) # e.g., "QC"
+  file_basename <- basename(file_path)
+  fao_code <- sub("_data\\.csv$", "", file_basename)
 
-  message(paste("Processing file:", file_basename, "(FAOSTAT Code:", fao_code, ")"))
+  message("\nProcessing FAO code: ", fao_code, " from file: ", file_basename)
 
-  tryCatch({
-    df <- read.csv(file_path, stringsAsFactors = FALSE) # stringsAsFactors=FALSE is good practice for text columns
+  if (!fao_code %in% names(datasets)) {
+    warning("No config entry for FAO code: ", fao_code, ". Skipping.")
+    next
+  }
 
-    # Ensure necessary columns for GDX conversion exist in the data frame.
-    required_cols_for_gdx <- c("Area", "Item", "Element", "Year", "Value")
-    if (!all(required_cols_for_gdx %in% names(df))) {
-      warning(paste0("Skipping GDX conversion for data from '", file_basename, "' as it's missing required columns: ",
-                     paste(setdiff(required_cols_for_gdx, names(df)), collapse = ", "),
-                     ". This dataset will not be included in the GDX file."))
-      next # Skip to the next file
-    }
-
-    # Prepare data for GDX: select relevant columns and ensure correct types.
-    # GAMS Transfer automatically handles types for sets and parameters.
-    # Make sure Year is treated as a string/factor if it's a dimension.
-    df_for_transfer <- df %>%
-      select(Area, Item, Element, Year, Value) %>%
-      mutate(Year = as.character(Year)) # GAMS sets are often strings
-
-
-    # Define the GAMS parameter name using the FAOSTAT code
-    gams_param_name <- paste0("p_", fao_code) # e.g., p_QC
-
-    # Create a new Parameter object in the GAMS container
-    # The domains are inferred from the column names of df_for_transfer
-    # excluding the last column (Value)
-    p <- m$addParameter(gams_param_name,
-                        domain = c("Area", "Item", "Element", "Year"), # Explicitly define domains
-                        description = paste("FAOSTAT Data for", fao_code))
-
-    # Add the data records to the parameter
-    p$setRecords(df_for_transfer)
-
-    message(paste("Successfully added data for:", code, "to GAMS container."))
-  }, error = function(e) {
-    warning(paste("Failed to process file '", file_basename, "': ", e$message, sep = ""))
+  df <- tryCatch(read.csv(file_path, stringsAsFactors = FALSE), error = function(e) {
+    warning("Failed to read CSV file: ", file_basename)
+    return(NULL)
   })
+  if (is.null(df)) next
+
+  mapping_cfg <- datasets[[fao_code]]$mapping
+  result_df <- data.frame()
+
+  for (target_dim in names(mapping_cfg)) {
+    mapping_rule <- mapping_cfg[[target_dim]]
+
+    if (is.character(mapping_rule)) {
+      # Direct rename
+      source_col <- mapping_rule
+      if (!source_col %in% names(df)) {
+        warning("Column '", source_col, "' not found in ", file_basename)
+        next
+      }
+      result_df[[target_dim]] <- df[[source_col]]
+    } else if (is.list(mapping_rule) && !is.null(mapping_rule$from) && !is.null(mapping_rule$file)) {
+      source_col <- mapping_rule$from
+      mapping_csv <- file.path(input_folder, mapping_rule$file)
+
+      if (!source_col %in% names(df)) {
+        warning("Source column '", source_col, "' not found in file ", file_basename)
+        next
+      }
+      if (!file.exists(mapping_csv)) {
+        warning("Mapping file not found: ", mapping_csv)
+        next
+      }
+
+      map_df <- read.csv(mapping_csv, stringsAsFactors = FALSE)
+      if (!(source_col %in% names(map_df)) || !(target_dim %in% names(map_df))) {
+        warning("Mapping file ", mapping_csv, " must contain columns: ", source_col, " and ", target_dim)
+        next
+      }
+
+      # Join mapping
+      mapped <- left_join(df[, source_col, drop = FALSE], map_df, by = setNames(source_col, source_col))
+      # Apply fallback
+      mapped[[target_dim]][is.na(mapped[[target_dim]])] <- paste0(target_dim, "_", df[[source_col]][is.na(mapped[[target_dim]])])
+      result_df[[target_dim]] <- mapped[[target_dim]]
+    } else {
+      warning("Invalid mapping format for '", target_dim, "' in FAO code: ", fao_code)
+      next
+    }
+  }
+
+  # Check for Value column
+  if (!"Value" %in% names(result_df)) {
+    warning("No 'Value' column found for ", fao_code, ". Skipping.")
+    next
+  }
+
+  # Ensure all dimensions exist
+  missing_dims <- setdiff(dimensions, names(result_df))
+  if (length(missing_dims) > 0) {
+    warning("Missing dimensions in ", fao_code, ": ", paste(missing_dims, collapse = ", "))
+    next
+  }
+
+  # Order columns: dimensions + Value
+  final_df <- result_df[, c(dimensions, "Value")]
+
+  # Add parameter to GAMS container
+  param_name <- paste0("p_", tolower(fao_code))
+  p <- m$addParameter(param_name,
+                      domain = dimensions,
+                      description = paste("FAOSTAT data for", fao_code))
+  p$setRecords(final_df)
+
+  message("✔ Processed FAO code: ", fao_code)
 }
 
-# Write all defined parameters in the container to a single GDX file
-if (length(m$parameters) > 0) { # Check if any parameters were added
-  message("\nAttempting to write data to GDX file using gamstransfer...")
+# --- Write GDX ---
+if (length(m$parameters) > 0) {
   tryCatch({
-    m$write(gdx_output_file)
-    message(paste("Successfully created GDX file:", gdx_output_file))
+    m$write(output_gdx_path)
+    message("\n✅ Successfully wrote GDX file to: ", output_gdx_path)
   }, error = function(e) {
-    warning(paste("Failed to write GDX file '", gdx_output_file, "': ", e$message, sep = ""))
-    message("Please ensure GAMS is installed on your system and its system directory is accessible.")
+    warning("❌ Failed to write GDX: ", e$message)
   })
 } else {
-  message("No valid datasets were successfully prepared for GDX conversion.")
+  message("No parameters were added. No GDX file created.")
 }
-
-message("GDX conversion script finished.")

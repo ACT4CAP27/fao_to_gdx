@@ -6,7 +6,7 @@
 # It has been replaced by the 'gamstransfer' package, which is available on CRAN.
 # 'gamstransfer' still requires a GAMS installation on your system.
 
-required_packages <- c("gamstransfer", "dplyr")
+required_packages <- c("gamstransfer", "dplyr", "jsonlite", "jsonvalidate")
 
 for (pkg in required_packages) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
